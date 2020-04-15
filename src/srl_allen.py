@@ -1,24 +1,32 @@
 import argparse
 import json
 import os
-
+from tqdm import tqdm
+import logging
+import pickle
 from allennlp.predictors.predictor import Predictor
-
+import sys
+sys.path.append('../')
 from src.data import io
-from src.data.data_loader import EcbDataLoader, IDataLoader
+from src.data.data_loader import EcbDataLoader, IDataLoader, TweetsDataLoader
 from src.data.doc import Doc
 from src.data.io import json_serialize_default
 from src.data.sentence import SRLSentence, SRLVerb, SRLArg
 
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
+                    datefmt='%m/%d/%Y %H:%M:%S',
+                    level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def run_srl(ecb_path: str, data_loader: IDataLoader):
+def run_srl(ecb_path: str, data_loader: IDataLoader, limit_sents: int = None):
     documents = data_loader.read_data_from_corpus_folder(ecb_path)
     predictor = Predictor.from_path(
         "https://s3-us-west-2.amazonaws.com/allennlp/models/srl-model-2018.05.25.tar.gz")
 
     sentences = Doc.to_sentences(documents)
     all_sentence_verbs = list()
-    for sentence in sentences:
+    limit = limit_sents if limit_sents else len(sentences)
+    for sentence in tqdm(sentences[:limit]):
         srl_sentence = SRLSentence(sentence.doc_id, sentence.sent_id)
         sentence_word = sentence.get_sentence_words()
         prediction = predictor.predict_tokenized(tokenized_sentence=sentence_word)
@@ -31,7 +39,7 @@ def run_srl(ecb_path: str, data_loader: IDataLoader):
             srl_sentence.add_srl_vrb(srl_verb)
 
         all_sentence_verbs.append(srl_sentence)
-        print('Dont with sentence from doc-' + sentence.doc_id + ', withId-' + str(sentence.sent_id))
+        #  print('Done with sentence from doc-' + sentence.doc_id + ', withId-' + str(sentence.sent_id))
 
     return all_sentence_verbs
 
@@ -47,9 +55,9 @@ def read_srl_json(file_path):
 
     all_doc_sentences = list()
     for data_obj in data:
-        doc_id = data_obj['ecb_doc_id'] #str
-        sent_id = data_obj['ecb_sent_id'] #int
-        srl_obj = data_obj['srl'] #list
+        doc_id = data_obj['ecb_doc_id']  # str
+        sent_id = data_obj['ecb_sent_id']  # int
+        srl_obj = data_obj['srl']  # list
 
         srl_sentences = SRLSentence(doc_id, sent_id)
         for obj in srl_obj:
@@ -80,16 +88,56 @@ def read_srl_json(file_path):
     return all_doc_sentences
 
 
+def read_srl_tweets(tweets_path: str, data_loader: IDataLoader):
+    documents = data_loader.read_data_from_corpus_folder(tweets_path)
+    predictor = Predictor.from_path(
+        "https://s3-us-west-2.amazonaws.com/allennlp/models/srl-model-2018.05.25.tar.gz")
+
+    sentences = Doc.to_sentences(documents)
+    all_sentence_verbs = list()
+    for sentence in sentences:
+        srl_sentence = SRLSentence(sentence.doc_id, sentence.sent_id)
+        sentence_word = sentence.get_sentence_words()
+        prediction = predictor.predict_tokenized(tokenized_sentence=sentence_word)
+        verbs = prediction['verbs']
+        words = prediction['words']
+        for verb in verbs:
+            srl_verb = SRLVerb()
+            tags = verb['tags']
+            srl_verb.add_var(tags, words)
+            srl_sentence.add_srl_vrb(srl_verb)
+
+        all_sentence_verbs.append(srl_sentence)
+        print('Dont with sentence from doc-' + sentence.doc_id + ', withId-' + str(sentence.sent_id))
+
+    return all_sentence_verbs
+
+
+def create_srl_tweets(corpus_path, output_file):
+    logger.info('running srl on {}'.format(corpus_path))
+    data_loader = TweetsDataLoader()
+    srl_results = run_srl(corpus_path, data_loader)
+    logger.info('finish running srl')
+    with open(output_file, 'w') as srlf:
+        json.dump(srl_results, srlf, default=json_serialize_default, indent=4, sort_keys=True)
+
+    
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Create SRL for ECB+ by AllenNLP')
-    parser.add_argument('--ecb_root_path', type=str, help='corpus root', required=True)
+    parser.add_argument('--corpus_path', type=str, help='corpus path', required=True)
     parser.add_argument('--output_file', type=str, help='output file', required=True)
-
+    parser.add_argument('--data_loader', type=str, help='data loader type: ecb \\ tweets', required=True)
+    parser.add_argument('--limit_sents', type=int, help='limit the number of sentences for testing', required=False)
     args = parser.parse_args()
     io.create_if_not_exist(os.path.dirname(args.output_file))
-
-    ecb_data_loader = EcbDataLoader()
-    srl_result = run_srl(args.ecb_root_path, ecb_data_loader)
+    if args.data_loader.lower() == 'ecb':
+        data_loader = EcbDataLoader()
+    else:
+        data_loader = TweetsDataLoader()
+    if args.limit_sents:
+        srl_result = run_srl(args.corpus_path, data_loader, args.limit_sents)
+    else:
+        srl_result = run_srl(args.corpus_path, data_loader)
 
     with open(args.output_file, 'w') as f:
         json.dump(srl_result, f, default=json_serialize_default, indent=4, sort_keys=True)
